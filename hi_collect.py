@@ -14,7 +14,10 @@ https://www.hi.co.kr/serviceAction.do
 import copy, json, re, sys, time
 from datetime import datetime
 from pathlib import Path
-import requests
+try:
+    from curl_cffi import requests
+except ImportError:
+    import requests
 import pandas as pd
 
 TEST_MODE = "--test" in sys.argv
@@ -240,10 +243,22 @@ def make_payload(base: dict, birth: str, sex_cd: str, payd_period: str | None = 
     return p
 
 
-def init_session() -> requests.Session:
-    s = requests.Session()
+def init_session():
+    try:
+        from curl_cffi import requests as cffi_requests
+        s = cffi_requests.Session(impersonate="chrome120")
+    except ImportError:
+        s = requests.Session()
     s.headers.update({"User-Agent": HEADERS["User-Agent"]})
-    s.get(f"{BASE}/serviceAction.do", timeout=15)
+    for attempt in range(3):
+        try:
+            s.get(f"{BASE}/serviceAction.do", timeout=15)
+            return s
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3)
+                continue
+            raise
     return s
 
 

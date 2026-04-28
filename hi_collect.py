@@ -506,6 +506,13 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
     # 하이클래스암 7종
     {"all_codes": ["2AQZ","2AQP","2FW0","2FW1","2FW2","2ARA","2AQQ"],
      "label": "하이클래스암7종"},
+    # 동시가입불가(1인1계약): 간병인사용상해입원일당 4종 — 각각 단독 수집
+    # 충돌 코드(3SN6, 3SR8 등)를 payload에서 0으로 강제 제거 후 1개씩 수집
+    *[
+        {"all_codes": [cd], "label": "동시가입불가_단독",
+         "zero_cds": ["3SN6","3SR8","3LP2","3ND2","3ND3","3LP3"]}
+        for cd in ["3LP2", "3ND2", "3ND3", "3LP3"]
+    ],
 ]
 
 
@@ -679,6 +686,9 @@ def collect_skipped_groups(
             cd: (min_amt if min_amt else payload_amounts.get(cd, 1000))
             for cd in all_codes
         }
+        # 동시가입불가 충돌 코드: payload에서 0으로 강제 제거
+        for cd in grp.get("zero_cds", []):
+            group_amts[cd] = 0
 
         tag = ",".join(all_codes[:3]) + ("..." if len(all_codes) > 3 else "")
         print(f"  [{gi:>2}/{total}] {gtype} [{tag}]  대상담보:{len(targets)}개")

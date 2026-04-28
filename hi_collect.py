@@ -407,7 +407,14 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
     if not semaki_path.exists():
         return all_rows
     semaki_data = json.loads(semaki_path.read_text(encoding="utf-8"))
-    renewal_cds = {r["cd"] for r in semaki_data if r.get("skip") and "인자값 오류" in r["skip"]}
+    # 갱신형 코드: "인자값 오류" 에러 + max_attempts 이면서 이름에 갱신형 포함
+    renewal_cds = {
+        r["cd"] for r in semaki_data
+        if r.get("skip") and (
+            "인자값 오류" in r["skip"]
+            or (r["skip"] == "max attempts" and "갱신형" in r.get("nm", ""))
+        )
+    }
     if not renewal_cds:
         return all_rows
 
@@ -484,14 +491,20 @@ def parse_coenroll_group(skip_msg: str) -> tuple[list[str], str]:
     if m169 and "최저가입금액" in msg:
         return [m169.group(1)], "최저금액제한"
 
-    m = re.search(
-        r'피보험자\s+([A-Z0-9]{4,})\[(동시가입|세트가입|필수가입|가입불가)\]',
-        msg
-    )
+    # 코드 문자열 추출 — "[" 이후 타입 식별 (잘린 메시지도 처리)
+    m = re.search(r'피보험자\s+([A-Z0-9]{4,})\[', msg)
     if not m:
         return [], "기타"
     codes_str = m.group(1)
-    gtype     = m.group(2)
+    after     = msg[m.end():]           # "[" 이후 텍스트
+
+    if   after.startswith("동시가입불가"): return [], "기타"   # 1인1계약 제한 → 해결불가
+    elif after.startswith("동시가"):     gtype = "동시가입"
+    elif after.startswith("세트가"):     gtype = "세트가입"
+    elif after.startswith("필수가"):     gtype = "필수가입"
+    elif after.startswith("가입불가"):   gtype = "가입불가"
+    else:                                return [], "기타"
+
     codes = [codes_str[i:i+4] for i in range(0, len(codes_str), 4) if len(codes_str[i:i+4]) == 4]
     if gtype == "가입불가":
         if "남성의 경우" in msg:
@@ -546,6 +559,16 @@ def load_skipped_groups(prod_cd: str = "167D") -> list[dict]:
 
     groups = list(group_map.values())
 
+    # max attempts 코드 중 기존 그룹 all_codes에 속한 것 → 해당 그룹의 target으로 추가
+    # (예: 남성/여성통합암 10종은 세트가입 그룹의 멤버이지만 혼자 시도해서 max attempts)
+    code_to_group = {cd: grp for grp in groups for cd in grp["all_codes"]}
+    for r in ungrouped:
+        cd, skip = r["cd"], r.get("skip", "")
+        if "max" in skip.lower() and "갱신형" not in r.get("nm", "") and cd in code_to_group:
+            grp = code_to_group[cd]
+            if not any(t[0] == cd for t in grp["targets"]):
+                grp["targets"].append((cd, r["nm"]))
+
     # 최저금액 제한 담보: 개별 수집, 금액 50 고정
     for r in ungrouped:
         codes, gtype = parse_coenroll_group(r.get("skip", ""))
@@ -557,7 +580,7 @@ def load_skipped_groups(prod_cd: str = "167D") -> list[dict]:
                 "targets":    [(r["cd"], r["nm"])],
                 "min_amt":    50,
             })
-        # 동시가입불가(1인1계약), max attempts, 필수가입 등 → 현재는 스킵
+        # 동시가입불가(1인1계약), 미해결 max attempts, 복잡 필수가입 등 → 현재는 스킵
 
     # ULT31117 배상책임 그룹 — skip 메시지에 코드가 없어서 하드코드
     for grp_info in 배상책임_그룹:

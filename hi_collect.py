@@ -466,6 +466,222 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
     return all_rows + new_rows
 
 
+배상책임_그룹 = [
+    # ULT31117: 배상책임 담보는 반드시 묶음 가입
+    {"all_codes": ["1ZRB", "1ZRC", "1ZRD"], "label": "배상책임(누수포함)"},
+    {"all_codes": ["1ZRE", "1ZRF"],          "label": "배상책임(누수제외)"},
+]
+
+
+def parse_coenroll_group(skip_msg: str) -> tuple[list[str], str]:
+    """스킵 메시지에서 동시가입 필요 코드 목록과 타입 반환."""
+    # 접두 레이블 제거 ("세트가입 해결 불가: ", "필수가입 해결 불가: " 등)
+    msg = re.sub(r'^[가-힣\s]+해결\s*불가\s*:\s*', '', skip_msg)
+
+    # 169D 접두 코드 (개별 담보 최저금액 에러)
+    # 예: "169D3LT500담보명 : 최저가입금액은 50"
+    m169 = re.search(r'169D([1-9A-Z][A-Z0-9]{3})\d+', msg)
+    if m169 and "최저가입금액" in msg:
+        return [m169.group(1)], "최저금액제한"
+
+    m = re.search(
+        r'피보험자\s+([A-Z0-9]{4,})\[(동시가입|세트가입|필수가입|가입불가)\]',
+        msg
+    )
+    if not m:
+        return [], "기타"
+    codes_str = m.group(1)
+    gtype     = m.group(2)
+    codes = [codes_str[i:i+4] for i in range(0, len(codes_str), 4) if len(codes_str[i:i+4]) == 4]
+    if gtype == "가입불가":
+        if "남성의 경우" in msg:
+            return codes, "여성전용"
+        if "여성의 경우" in msg:
+            return codes, "남성전용"
+        return codes, "성별제한"
+    return codes, gtype
+
+
+def load_skipped_groups(prod_cd: str = "167D") -> list[dict]:
+    """
+    스킵된 담보를 동시가입 그룹별로 정리.
+    갱신형(인자값 오류)은 제외 — 이미 연만기로 보완됨.
+    Returns list of {all_codes, targets, group_type, only_sex}
+    """
+    fname = "coverage_amounts_세만기.json" if prod_cd == "169D" else "coverage_amounts.json"
+    f = Path(__file__).parent / fname
+    if not f.exists():
+        return []
+    data = json.loads(f.read_text(encoding="utf-8"))
+
+    skipped = [
+        r for r in data
+        if r.get("skip") and "인자값 오류" not in r.get("skip", "")
+    ]
+
+    group_map: dict[frozenset, dict] = {}
+    ungrouped: list[dict] = []
+
+    for r in skipped:
+        cd       = r["cd"]
+        skip_msg = r.get("skip", "")
+        codes, gtype = parse_coenroll_group(skip_msg)
+
+        if not codes:
+            ungrouped.append(r)
+            continue
+
+        key = frozenset(codes)
+        if key not in group_map:
+            only_sex = "2" if gtype == "여성전용" else ("1" if gtype == "남성전용" else None)
+            group_map[key] = {
+                "all_codes":  codes,
+                "group_type": gtype,
+                "only_sex":   only_sex,
+                "targets":    [],
+            }
+        targets = group_map[key]["targets"]
+        if not any(t[0] == cd for t in targets):
+            targets.append((cd, r["nm"]))
+
+    groups = list(group_map.values())
+
+    # 최저금액 제한 담보: 개별 수집, 금액 50 고정
+    for r in ungrouped:
+        codes, gtype = parse_coenroll_group(r.get("skip", ""))
+        if gtype == "최저금액제한" and codes:
+            groups.append({
+                "all_codes":  codes,
+                "group_type": "최저금액제한",
+                "only_sex":   None,
+                "targets":    [(r["cd"], r["nm"])],
+                "min_amt":    50,
+            })
+        # 동시가입불가(1인1계약), max attempts, 필수가입 등 → 현재는 스킵
+
+    # ULT31117 배상책임 그룹 — skip 메시지에 코드가 없어서 하드코드
+    for grp_info in 배상책임_그룹:
+        target_cds = grp_info["all_codes"]
+        # data에 해당 코드가 있는지 확인
+        targets = [(r["cd"], r["nm"]) for r in data if r["cd"] in target_cds]
+        if targets:
+            groups.append({
+                "all_codes":  target_cds,
+                "group_type": "배상책임",
+                "only_sex":   None,
+                "targets":    targets,
+            })
+
+    return groups
+
+
+def extract_payload_amounts(base_payload: dict) -> dict[str, int]:
+    """Base payload에서 담보별 가입금액 추출 (elagWonInsdAmt, 천원 단위)."""
+    req   = base_payload.get("request", base_payload)
+    outer = req.get("elagInfoList", [])
+    if not outer:
+        return {}
+    inner = outer[0].get("elagInfoList", []) if isinstance(outer[0], dict) else []
+    result = {}
+    for e in inner:
+        cd  = e.get("elagClsCd")
+        amt = e.get("elagWonInsdAmt")
+        if cd and amt and float(amt or 0) > 0:
+            result[cd] = int(float(amt))
+    return result
+
+
+def collect_skipped_groups(
+    session,
+    label: str,
+    periods: list[str],
+    base_payload: dict,
+    groups: list[dict],
+    payload_amounts: dict[str, int],
+) -> list[dict]:
+    """
+    동시가입/세트가입 그룹 담보 수집.
+    그룹 내 전체 코드를 페이로드에 함께 넣어 개별 보험료를 추출.
+    여성전용/남성전용은 해당 성별만 수집.
+    """
+    rows = []
+    total = len(groups)
+    print(f"\n▶ [{label}] 스킵 그룹 수집 시작: {total}그룹")
+
+    for gi, grp in enumerate(groups, 1):
+        all_codes  = grp["all_codes"]
+        targets    = grp["targets"]        # [(cd, nm), ...]
+        gtype      = grp["group_type"]
+        only_sex   = grp["only_sex"]       # "1"/"2"/None
+        target_cds = {cd for cd, _ in targets}
+
+        # 그룹 전체 코드의 가입금액: min_amt 지정 시 우선, payload 원본값, 없으면 1000천원
+        min_amt    = grp.get("min_amt")
+        group_amts = {
+            cd: (min_amt if min_amt else payload_amounts.get(cd, 1000))
+            for cd in all_codes
+        }
+
+        tag = ",".join(all_codes[:3]) + ("..." if len(all_codes) > 3 else "")
+        print(f"  [{gi:>2}/{total}] {gtype} [{tag}]  대상담보:{len(targets)}개")
+
+        for period in periods:
+            period_nm = PERIOD_LABEL.get(period, period)
+            for age in AGES:
+                sex_list = [(s, n) for s, n in SEXES if only_sex is None or s == only_sex]
+                for sex_cd, sex_nm in sex_list:
+                    effective = dict(group_amts)
+                    for attempt in range(5):
+                        payload = make_payload(base_payload, BIRTH[age], sex_cd, period, effective)
+                        try:
+                            resp   = call_api(session, payload)
+                            parsed = parse_response(resp, age, sex_nm, period_nm)
+                            for item in parsed:
+                                if item["담보코드"] in target_cds:
+                                    item["상품"]     = label
+                                    item["스킵사유"] = gtype
+                                    rows.append(item)
+                            break
+                        except RuntimeError as e:
+                            err_msg = str(e)
+                            removed = 0
+                            if "동시가입불가" in err_msg:
+                                for m2 in re.finditer(
+                                    r'([1-9][A-Z0-9]{3})([1-9][A-Z0-9]{3})\[동시가입불가\]', err_msg
+                                ):
+                                    cd_r = m2.group(2)
+                                    if cd_r in effective and cd_r not in target_cds:
+                                        del effective[cd_r]
+                                        removed += 1
+                            elif "ULT01009" in err_msg or (
+                                "ULT00016" in err_msg and "키구성" in err_msg
+                            ):
+                                m_cd = re.search(r'담보:([1-9][A-Z0-9]{3})', err_msg)
+                                candidates = (
+                                    [m_cd.group(1)] if m_cd
+                                    else re.findall(r'([1-9][A-Z0-9]{3})', err_msg)
+                                )
+                                for cd_r in candidates:
+                                    if cd_r in effective and cd_r not in target_cds:
+                                        del effective[cd_r]
+                                        removed += 1
+                                        break
+                            if removed:
+                                continue
+                            print(f"    {period_nm} {age}세 {sex_nm}: {err_msg[:100]}")
+                            break
+                        except Exception as e:
+                            if attempt < 2:
+                                time.sleep(3)
+                                continue
+                            print(f"    {period_nm} {age}세 {sex_nm}: 실패 {e}")
+                            break
+                    time.sleep(0.3)
+
+    print(f"  → 스킵 그룹 수집 완료: {len(rows)}행")
+    return rows
+
+
 def main():
     payloads = load_payloads()
 
@@ -480,15 +696,27 @@ def main():
         print_test_result(resp)
         return
 
-    all_rows = []
+    all_rows   = []
+    skip_rows  = []
+
     for label, periods, base_payload in payloads:
-        req = base_payload.get("request", base_payload)
+        req     = base_payload.get("request", base_payload)
         prod_cd = req.get("ltapcommonVO", {}).get("inagProdCd", "167D")
+
         extra_amounts = load_coverage_amounts(prod_cd)
         if extra_amounts:
             print(f"▶ [{label}] coverage_amounts 로드: {len(extra_amounts)}개 ({prod_cd})")
+
         rows = collect_one(session, label, periods, base_payload, extra_amounts)
         all_rows.extend(rows)
+
+        # 스킵 그룹 수집
+        groups = load_skipped_groups(prod_cd)
+        if groups:
+            payload_amts = extract_payload_amounts(base_payload)
+            skip_rows.extend(
+                collect_skipped_groups(session, label, periods, base_payload, groups, payload_amts)
+            )
 
     if not all_rows:
         print("수집된 데이터 없음")
@@ -496,20 +724,33 @@ def main():
 
     all_rows = supplement_renewal_coverages(all_rows)
 
-    df   = pd.DataFrame(all_rows)
-    cols = ["상품", "나이", "성별", "납입기간", "담보코드", "담보명", "담보보험료", "기본보험료", "총납입보험료"]
-    df   = df[[c for c in cols if c in df.columns]]
     out  = Path(__file__).parent / f"hi_보험료_{TODAY}.xlsx"
+    cols_main = ["상품", "나이", "성별", "납입기간", "담보코드", "담보명", "담보보험료", "기본보험료", "총납입보험료"]
+    cols_skip = ["상품", "나이", "성별", "납입기간", "담보코드", "담보명", "스킵사유", "담보보험료", "기본보험료", "총납입보험료"]
 
-    with pd.ExcelWriter(out, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="보험료")
-        ws = w.sheets["보험료"]
+    df_main = pd.DataFrame(all_rows)
+    df_main = df_main[[c for c in cols_main if c in df_main.columns]]
+
+    df_skip = pd.DataFrame(skip_rows) if skip_rows else pd.DataFrame(columns=cols_skip)
+    if not df_skip.empty:
+        df_skip = df_skip[[c for c in cols_skip if c in df_skip.columns]]
+
+    def autofit(ws):
         for col in ws.columns:
             mx = max(len(str(c.value or "")) for c in col)
             ws.column_dimensions[col[0].column_letter].width = min(mx + 4, 45)
 
-    print(f"\n✅ {out.name} 저장  ({len(df):,}행)")
-    print(df.groupby(["상품", "납입기간", "성별"])["담보보험료"].count().rename("담보수").to_string())
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        df_main.to_excel(w, index=False, sheet_name="보험료")
+        autofit(w.sheets["보험료"])
+        df_skip.to_excel(w, index=False, sheet_name="스킵담보")
+        autofit(w.sheets["스킵담보"])
+
+    print(f"\n✅ {out.name} 저장  (보험료:{len(df_main):,}행 / 스킵담보:{len(df_skip):,}행)")
+    print(df_main.groupby(["상품", "납입기간", "성별"])["담보보험료"].count().rename("담보수").to_string())
+    if not df_skip.empty:
+        print("\n[스킵담보 수집 현황]")
+        print(df_skip.groupby(["상품", "스킵사유", "담보코드"])["담보보험료"].count().rename("행수").to_string())
 
 
 if __name__ == "__main__":

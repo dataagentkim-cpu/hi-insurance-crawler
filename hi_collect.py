@@ -407,14 +407,18 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
     if not semaki_path.exists():
         return all_rows
     semaki_data = json.loads(semaki_path.read_text(encoding="utf-8"))
-    # 갱신형 코드: "인자값 오류" 에러 + max_attempts 이면서 이름에 갱신형 포함
-    renewal_cds = {
-        r["cd"] for r in semaki_data
-        if r.get("skip") and (
-            "인자값 오류" in r["skip"]
-            or (r["skip"] == "max attempts" and "갱신형" in r.get("nm", ""))
-        )
-    }
+    def _is_renewal(r: dict) -> bool:
+        nm, skip = r.get("nm", ""), r.get("skip", "")
+        if not skip:
+            return False
+        if "인자값 오류" in skip:
+            return True
+        if skip == "max attempts":
+            # 이름에 갱신형 포함, 또는 40자 잘림으로 "갱신형" 미포함된 경우
+            return "갱신형" in nm or (len(nm) == 40 and (nm.endswith("(갱") or nm.endswith("(갱신")))
+        return False
+
+    renewal_cds = {r["cd"] for r in semaki_data if _is_renewal(r)}
     if not renewal_cds:
         return all_rows
 
@@ -477,6 +481,31 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
     # ULT31117: 배상책임 담보는 반드시 묶음 가입
     {"all_codes": ["1ZRB", "1ZRC", "1ZRD"], "label": "배상책임(누수포함)"},
     {"all_codes": ["1ZRE", "1ZRF"],          "label": "배상책임(누수제외)"},
+]
+
+# max_attempts 미분류 — 이름/구조로 그룹 추론한 하드코드 세트
+추가_그룹 = [
+    # 여성통합암(전이포함)진단 12종 — 남성통합암 세트와 동일한 구조로 세트가입 추정
+    {"all_codes": ["3NM4","3NM5","3NM6","3NM7","3NM8","3NM9",
+                   "3NN0","3NN1","3NN2","3NN3","3NN4","3NN5"],
+     "label": "여성통합암진단세트", "only_sex": "2"},
+    # 남성통합암 추가 멤버 (동일 type 다른 코드 계열 — 기존 3NL4~3NM3 세트에 합류 시도)
+    {"all_codes": ["3NL4","3NL5","3NL6","3NL7","3NL8","3NL9",
+                   "3NM0","3NM1","3NM2","3NM3","3LX9"],
+     "label": "남성통합암진단세트확장", "only_sex": "1"},
+    # 여성통합암 추가 멤버
+    {"all_codes": ["3NM4","3NM5","3NM6","3NM7","3NM8","3NM9",
+                   "3NN0","3NN1","3NN2","3NN3","3NN4","3NN5","3LY9"],
+     "label": "여성통합암진단세트확장", "only_sex": "2"},
+    # 심혈관질환 세부 3종 — 묶음 시도
+    {"all_codes": ["3MW6", "3MW7", "3NB9"], "label": "심혈관질환세부3종"},
+    # 간병인사용질병입원일당Ⅶ(요양병원및의원) — 단독 시도
+    {"all_codes": ["3ND6"], "label": "간병인요양병원"},
+    # 유사암주요치료비Ⅲ 상급종합병원 4종
+    {"all_codes": ["2DWB", "2DWF", "2DUG", "2DUL"], "label": "유사암주요치료비Ⅲ상급4종"},
+    # 하이클래스암 7종
+    {"all_codes": ["2AQZ","2AQP","2FW0","2FW1","2FW2","2ARA","2AQQ"],
+     "label": "하이클래스암7종"},
 ]
 
 
@@ -582,18 +611,24 @@ def load_skipped_groups(prod_cd: str = "167D") -> list[dict]:
             })
         # 동시가입불가(1인1계약), 미해결 max attempts, 복잡 필수가입 등 → 현재는 스킵
 
-    # ULT31117 배상책임 그룹 — skip 메시지에 코드가 없어서 하드코드
-    for grp_info in 배상책임_그룹:
+    # 하드코드 그룹 (배상책임 + 추가 미분류 그룹)
+    existing_target_cds = {cd for grp in groups for cd, _ in grp["targets"]}
+    for grp_info in [*배상책임_그룹, *추가_그룹]:
         target_cds = grp_info["all_codes"]
-        # data에 해당 코드가 있는지 확인
-        targets = [(r["cd"], r["nm"]) for r in data if r["cd"] in target_cds]
+        only_sex   = grp_info.get("only_sex")
+        # data에 있고 아직 다른 그룹 target으로 처리 안 된 코드만 포함
+        targets = [
+            (r["cd"], r["nm"]) for r in data
+            if r["cd"] in target_cds and r["cd"] not in existing_target_cds
+        ]
         if targets:
             groups.append({
                 "all_codes":  target_cds,
-                "group_type": "배상책임",
-                "only_sex":   None,
+                "group_type": grp_info.get("label", "하드코드"),
+                "only_sex":   only_sex,
                 "targets":    targets,
             })
+            existing_target_cds.update(cd for cd, _ in targets)
 
     return groups
 

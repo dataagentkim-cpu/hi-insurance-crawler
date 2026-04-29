@@ -20,7 +20,8 @@ except ImportError:
     import requests
 import pandas as pd
 
-TEST_MODE = "--test" in sys.argv
+TEST_MODE      = "--test"      in sys.argv
+SKIP_TEST_MODE = "--skip-test" in sys.argv
 
 TODAY = datetime.today().strftime("%Y%m%d")
 BASE  = "https://www.hi.co.kr"
@@ -79,8 +80,8 @@ BIRTH = {
     45: "19810701", 50: "19760701", 55: "19710701",
     60: "19660701", 65: "19610701", 70: "19560701",
 }
-AGES  = [50] if TEST_MODE else [30, 35, 40, 45, 50, 55, 60, 65, 70]
-SEXES = [("1", "남")] if TEST_MODE else [("1", "남"), ("2", "여")]
+AGES  = [50] if (TEST_MODE or SKIP_TEST_MODE) else [30, 35, 40, 45, 50, 55, 60, 65, 70]
+SEXES = [("1", "남")] if (TEST_MODE or SKIP_TEST_MODE) else [("1", "남"), ("2", "여")]
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -478,36 +479,48 @@ def supplement_renewal_coverages(all_rows: list[dict]) -> list[dict]:
 
 
 배상책임_그룹 = [
-    # ULT31117: 배상책임 담보는 반드시 묶음 가입
+    # ULT31117: 배상책임 담보는 반드시 묶음 가입 (세만기 전용)
     {"all_codes": ["1ZRB", "1ZRC", "1ZRD"], "label": "배상책임(누수포함)"},
     {"all_codes": ["1ZRE", "1ZRF"],          "label": "배상책임(누수제외)"},
 ]
 
-# max_attempts 미분류 — 이름/구조로 그룹 추론한 하드코드 세트
-추가_그룹 = [
-    # 여성통합암(전이포함)진단 12종 — 남성통합암 세트와 동일한 구조로 세트가입 추정
+# prod_cd별 하드코드 그룹 (연만기=167D / 세만기=169D)
+추가_그룹_167D: list[dict] = [
+    # 연만기 남성통합암 10종 세트 (API 에러에서 확인: 3LX3~3LY2)
+    {"all_codes": ["3LX3","3LX4","3LX5","3LX6","3LX7","3LX8","3LX9",
+                   "3LY0","3LY1","3LY2"],
+     "label": "남성통합암진단세트(연만기)", "only_sex": "1"},
+    # 연만기 동시가입불가_단독 (간병인사용상해입원일당)
+    *[
+        {"all_codes": [cd], "label": "동시가입불가_단독",
+         "zero_cds": ["3SN6","3SR8","3LP2","3ND2","3ND3","3LP3"]}
+        for cd in ["3LP2", "3ND2", "3ND3", "3LP3"]
+    ],
+]
+
+추가_그룹_169D: list[dict] = [
+    # 세만기 여성통합암 12종 세트
     {"all_codes": ["3NM4","3NM5","3NM6","3NM7","3NM8","3NM9",
                    "3NN0","3NN1","3NN2","3NN3","3NN4","3NN5"],
      "label": "여성통합암진단세트", "only_sex": "2"},
-    # 남성통합암 추가 멤버 (동일 type 다른 코드 계열 — 기존 3NL4~3NM3 세트에 합류 시도)
+    # 세만기 남성통합암 세트 + 확장 멤버
     {"all_codes": ["3NL4","3NL5","3NL6","3NL7","3NL8","3NL9",
                    "3NM0","3NM1","3NM2","3NM3","3LX9"],
-     "label": "남성통합암진단세트확장", "only_sex": "1"},
-    # 여성통합암 추가 멤버
+     "label": "남성통합암진단세트확장(세만기)", "only_sex": "1"},
+    # 세만기 여성통합암 확장 멤버
     {"all_codes": ["3NM4","3NM5","3NM6","3NM7","3NM8","3NM9",
                    "3NN0","3NN1","3NN2","3NN3","3NN4","3NN5","3LY9"],
-     "label": "여성통합암진단세트확장", "only_sex": "2"},
-    # 심혈관질환 세부 3종 — 묶음 시도
+     "label": "여성통합암진단세트확장(세만기)", "only_sex": "2"},
+    # 심혈관질환 세부 3종
     {"all_codes": ["3MW6", "3MW7", "3NB9"], "label": "심혈관질환세부3종"},
-    # 간병인사용질병입원일당Ⅶ(요양병원및의원) — 단독 시도
+    # 간병인사용질병입원일당Ⅶ(요양병원및의원)
     {"all_codes": ["3ND6"], "label": "간병인요양병원"},
     # 유사암주요치료비Ⅲ 상급종합병원 4종
     {"all_codes": ["2DWB", "2DWF", "2DUG", "2DUL"], "label": "유사암주요치료비Ⅲ상급4종"},
     # 하이클래스암 7종
     {"all_codes": ["2AQZ","2AQP","2FW0","2FW1","2FW2","2ARA","2AQQ"],
      "label": "하이클래스암7종"},
-    # 동시가입불가(1인1계약): 간병인사용상해입원일당 4종 — 각각 단독 수집
-    # 충돌 코드(3SN6, 3SR8 등)를 payload에서 0으로 강제 제거 후 1개씩 수집
+    # 세만기 동시가입불가_단독
     *[
         {"all_codes": [cd], "label": "동시가입불가_단독",
          "zero_cds": ["3SN6","3SR8","3LP2","3ND2","3ND3","3LP3"]}
@@ -618,9 +631,11 @@ def load_skipped_groups(prod_cd: str = "167D") -> list[dict]:
             })
         # 동시가입불가(1인1계약), 미해결 max attempts, 복잡 필수가입 등 → 현재는 스킵
 
-    # 하드코드 그룹 (배상책임 + 추가 미분류 그룹)
+    # 하드코드 그룹 (prod_cd별 선택)
+    추가 = 추가_그룹_169D if prod_cd == "169D" else 추가_그룹_167D
+    배상책임 = 배상책임_그룹 if prod_cd == "169D" else []
     existing_target_cds = {cd for grp in groups for cd, _ in grp["targets"]}
-    for grp_info in [*배상책임_그룹, *추가_그룹]:
+    for grp_info in [*배상책임, *추가]:
         target_cds = grp_info["all_codes"]
         only_sex   = grp_info.get("only_sex")
         # data에 있고 아직 다른 그룹 target으로 처리 안 된 코드만 포함
@@ -686,9 +701,11 @@ def collect_skipped_groups(
             cd: (min_amt if min_amt else payload_amounts.get(cd, 1000))
             for cd in all_codes
         }
-        # 동시가입불가 충돌 코드: payload에서 0으로 강제 제거
+        # 동시가입불가 충돌 코드: base payload에서 non-zero인 경우만 0으로 강제 제거
+        # (이미 "0"(string)인 코드는 건드리지 않음 - int 0 변환 시 API가 다르게 해석)
         for cd in grp.get("zero_cds", []):
-            group_amts[cd] = 0
+            if cd not in target_cds and cd in payload_amounts:
+                group_amts[cd] = 0
 
         tag = ",".join(all_codes[:3]) + ("..." if len(all_codes) > 3 else "")
         print(f"  [{gi:>2}/{total}] {gtype} [{tag}]  대상담보:{len(targets)}개")
@@ -721,6 +738,35 @@ def collect_skipped_groups(
                                     if cd_r in effective and cd_r not in target_cds:
                                         del effective[cd_r]
                                         removed += 1
+                            elif "최대" in err_msg and "천원이하" in err_msg:
+                                # 최대 가입금액 초과 → 에러 발생 담보를 max로 조정 후 재시도
+                                m_amt = re.search(r'최대\s*(\d+)천원이하', err_msg)
+                                if m_amt:
+                                    max_amt = int(m_amt.group(1))
+                                    m_cd = re.search(
+                                        r'(?:167D|169D)([1-9][A-Z0-9]{3})', err_msg
+                                    )
+                                    if m_cd:
+                                        cd_fix = m_cd.group(1)
+                                        if effective.get(cd_fix) != max_amt:
+                                            effective[cd_fix] = max_amt
+                                            removed += 1
+                                    else:
+                                        for cd_t in target_cds:
+                                            if effective.get(cd_t, 0) > max_amt:
+                                                effective[cd_t] = max_amt
+                                                removed += 1
+                            elif "세트가입" in err_msg or "필수가입" in err_msg:
+                                # 필요한 동반 코드를 에러 메시지에서 파싱해 추가
+                                m2 = re.search(r'피보험자\s+([A-Z0-9]{4,})\[(?:세트가|필수가)', err_msg)
+                                if m2:
+                                    req_str   = m2.group(1)
+                                    req_codes = [req_str[i:i+4] for i in range(0, len(req_str), 4)
+                                                 if len(req_str[i:i+4]) == 4]
+                                    for rc in req_codes:
+                                        if rc not in effective:
+                                            effective[rc] = payload_amounts.get(rc, 1000)
+                                            removed += 1
                             elif "ULT01009" in err_msg or (
                                 "ULT00016" in err_msg and "키구성" in err_msg
                             ):
@@ -758,10 +804,29 @@ def main():
 
     if TEST_MODE:
         label, periods, base_payload = payloads[0]
-        period = periods[1] if len(periods) > 1 else periods[0]  # 두 번째 납입기간으로 테스트
+        period = periods[1] if len(periods) > 1 else periods[0]
         print(f"🧪 테스트: [{label}] {PERIOD_LABEL.get(period, period)} 50세 남 1회")
         resp = call_api(session, make_payload(base_payload, BIRTH[50], "1", period))
         print_test_result(resp)
+        return
+
+    if SKIP_TEST_MODE:
+        # 스킵 그룹만 1개 납입기간 × 50세 남 으로 테스트
+        label, periods, base_payload = payloads[0]
+        period = periods[0]
+        req     = base_payload.get("request", base_payload)
+        prod_cd = req.get("ltapcommonVO", {}).get("inagProdCd", "167D")
+        groups       = load_skipped_groups(prod_cd)
+        payload_amts = extract_payload_amounts(base_payload)
+        print(f"🧪 스킵그룹 테스트: [{label}] {PERIOD_LABEL.get(period, period)} 50세 남")
+        print(f"   그룹 수: {len(groups)}, 총 대상 담보: {sum(len(g['targets']) for g in groups)}개")
+        rows = collect_skipped_groups(session, label, [period], base_payload, groups, payload_amts)
+        if rows:
+            df = pd.DataFrame(rows)
+            cols = ["담보코드", "담보명", "스킵사유", "담보보험료"]
+            print(df[[c for c in cols if c in df.columns]].to_string(index=False))
+        else:
+            print("수집된 행 없음")
         return
 
     all_rows   = []

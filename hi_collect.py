@@ -710,9 +710,14 @@ def collect_skipped_groups(
         tag = ",".join(all_codes[:3]) + ("..." if len(all_codes) > 3 else "")
         print(f"  [{gi:>2}/{total}] {gtype} [{tag}]  대상담보:{len(targets)}개")
 
+        group_skip = False  # 납만기 전용 등 그룹 전체 스킵 플래그
         for period in periods:
+            if group_skip:
+                break
             period_nm = PERIOD_LABEL.get(period, period)
             for age in AGES:
+                if group_skip:
+                    break
                 sex_list = [(s, n) for s, n in SEXES if only_sex is None or s == only_sex]
                 for sex_cd, sex_nm in sex_list:
                     effective = dict(group_amts)
@@ -782,6 +787,11 @@ def collect_skipped_groups(
                                         break
                             if removed:
                                 continue
+                            # 납만기 전용 담보: 이 그룹은 어떤 납입기간도 안 됨 → 전체 스킵
+                            if "납만기를 선택" in err_msg:
+                                print(f"    → 납만기 전용 담보, 그룹 스킵")
+                                group_skip = True
+                                break
                             print(f"    {period_nm} {age}세 {sex_nm}: {err_msg[:100]}")
                             break
                         except Exception as e:

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  연만기:
+  yeonmangi:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -36,10 +36,10 @@ jobs:
           path: hi_보험료_*.xlsx
           retention-days: 30
 
-  세만기1:
+  semaki1:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    needs: 연만기
+    needs: yeonmangi
 
     steps:
       - uses: actions/checkout@v4
@@ -69,10 +69,10 @@ jobs:
           path: hi_보험료_*.xlsx
           retention-days: 30
 
-  세만기2:
+  semaki2:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    needs: 연만기
+    needs: yeonmangi
 
     steps:
       - uses: actions/checkout@v4

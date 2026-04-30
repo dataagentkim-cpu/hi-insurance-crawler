@@ -758,8 +758,8 @@ COLS_SKIP = ["상품", "나이", "성별", "납입기간", "담보코드", "담�
              "스킵사유", "담보보험료", "기본보험료", "총납입보험료"]
 
 
-def save_excel(all_rows: list[dict], skip_rows: list[dict]) -> Path:
-    out = ROOT / f"hi_보험료_{TODAY}.xlsx"
+def save_excel(all_rows: list[dict], skip_rows: list[dict], suffix: str = "") -> Path:
+    out = ROOT / f"hi_보험료_{TODAY}{suffix}.xlsx"
     df_main = pd.DataFrame(all_rows)
     df_main = df_main[[c for c in COLS_MAIN if c in df_main.columns]]
     df_skip = pd.DataFrame(skip_rows) if skip_rows else pd.DataFrame(columns=COLS_SKIP)
@@ -772,7 +772,7 @@ def save_excel(all_rows: list[dict], skip_rows: list[dict]) -> Path:
         df_skip.to_excel(w, index=False, sheet_name="스킵담보")
         autofit(w.sheets["스킵담보"])
 
-    log.info("✅ %s 저장 (보험료:%d행 / 스킵담보:%d행)", out.name, len(df_main), len(df_skip))
+    log.info("💾 %s 저장 (보험료:%d행 / 스킵담보:%d행)", out.name, len(df_main), len(df_skip))
     print(df_main.groupby(["상품", "납입기간", "성별"])["담보보험료"].count()
           .rename("담보수").to_string())
     if not df_skip.empty:
@@ -914,11 +914,13 @@ def main() -> None:
         if extra:
             log.info("▶ [%s] coverage_amounts: %d개 (%s)", prod.label, len(extra), prod_cd)
         all_rows.extend(collect_one(session, prod, ages, sexes, extra))
+        save_excel(supplement_renewal_coverages(all_rows), skip_rows, suffix="_partial")
 
         groups = load_skipped_groups(prod_cd)
         if groups:
             amts = extract_payload_amounts(prod.payload)
             skip_rows.extend(collect_skipped_groups(session, prod, ages, sexes, groups, amts))
+            save_excel(supplement_renewal_coverages(all_rows), skip_rows, suffix="_partial")
 
     if not all_rows:
         log.warning("수집된 데이터 없음")

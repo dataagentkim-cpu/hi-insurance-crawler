@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  collect:
+  연만기:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +18,86 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      - name: 수집 실행
-        run: python3 hi_collect.py
+      - name: 연만기 수집
+        run: python3 hi_collect.py --product 연만기
+
+      - name: rows JSON 업로드 (세만기 job 보완용)
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi-rows-연만기
+          path: hi_rows_*_연만기.json
+          retention-days: 1
 
       - name: Excel 업로드
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hi-insurance-excel
+          name: hi-excel-연만기
+          path: hi_보험료_*.xlsx
+          retention-days: 30
+
+  세만기1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: 연만기
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 연만기 rows 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: hi-rows-연만기
+
+      - name: 세만기 1종 수집
+        run: |
+          ROWS=$(ls hi_rows_*_연만기.json 2>/dev/null | head -1)
+          python3 hi_collect.py --product 세만기1 ${ROWS:+--load-rows "$ROWS"}
+
+      - name: Excel 업로드
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hi-excel-세만기1
+          path: hi_보험료_*.xlsx
+          retention-days: 30
+
+  세만기2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    needs: 연만기
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 연만기 rows 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: hi-rows-연만기
+
+      - name: 세만기 2종 수집
+        run: |
+          ROWS=$(ls hi_rows_*_연만기.json 2>/dev/null | head -1)
+          python3 hi_collect.py --product 세만기2 ${ROWS:+--load-rows "$ROWS"}
+
+      - name: Excel 업로드
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hi-excel-세만기2
           path: hi_보험료_*.xlsx
           retention-days: 30

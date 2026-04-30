@@ -855,6 +855,10 @@ def parse_args() -> argparse.Namespace:
                    help="스킵그룹만 1조합 테스트")
     p.add_argument("--show-capture-guide", action="store_true",
                    help="브라우저 인터셉터 가이드 출력")
+    p.add_argument("--product", choices=["all", "연만기", "세만기1", "세만기2"],
+                   default="all", help="수집할 상품 범위 (기본: all)")
+    p.add_argument("--load-rows", type=Path, default=None,
+                   help="보완용 기존 수집 결과 JSON (세만기 job에서 연만기 rows 로드)")
     p.add_argument("-v", "--verbose", action="store_true", help="DEBUG 로그")
     return p.parse_args()
 
@@ -868,6 +872,21 @@ def main() -> None:
         return
 
     payloads = load_payloads()
+
+    # --product 필터
+    if args.product == "연만기":
+        payloads = [p for p in payloads if "연만기" in p.label]
+    elif args.product == "세만기1":
+        payloads = [p for p in payloads if "세만기" in p.label and "1종" in p.label]
+    elif args.product == "세만기2":
+        payloads = [p for p in payloads if "세만기" in p.label and "2종" in p.label]
+    log.info("▶ 수집 대상: %s", [p.label for p in payloads])
+
+    # --load-rows: 세만기 job에서 연만기 rows를 불러와 보완에 활용
+    base_rows: list[dict] = []
+    if args.load_rows and args.load_rows.exists():
+        base_rows = json.loads(args.load_rows.read_text(encoding="utf-8"))
+        log.info("▶ 기존 rows 로드: %d행 (%s)", len(base_rows), args.load_rows.name)
 
     log.info("▶ 세션 초기화...")
     session = init_session()
@@ -914,19 +933,25 @@ def main() -> None:
         if extra:
             log.info("▶ [%s] coverage_amounts: %d개 (%s)", prod.label, len(extra), prod_cd)
         all_rows.extend(collect_one(session, prod, ages, sexes, extra))
-        save_excel(supplement_renewal_coverages(all_rows), skip_rows, suffix="_partial")
+        save_excel(supplement_renewal_coverages(base_rows + all_rows), skip_rows, suffix="_partial")
 
         groups = load_skipped_groups(prod_cd)
         if groups:
             amts = extract_payload_amounts(prod.payload)
             skip_rows.extend(collect_skipped_groups(session, prod, ages, sexes, groups, amts))
-            save_excel(supplement_renewal_coverages(all_rows), skip_rows, suffix="_partial")
+            save_excel(supplement_renewal_coverages(base_rows + all_rows), skip_rows, suffix="_partial")
 
     if not all_rows:
         log.warning("수집된 데이터 없음")
         return
 
-    all_rows = supplement_renewal_coverages(all_rows)
+    # 연만기 job: 다음 job에서 보완에 쓸 rows JSON 저장
+    if args.product == "연만기":
+        rows_out = ROOT / f"hi_rows_{TODAY}_연만기.json"
+        rows_out.write_text(json.dumps(all_rows, ensure_ascii=False), encoding="utf-8")
+        log.info("▶ rows JSON 저장: %s (%d행)", rows_out.name, len(all_rows))
+
+    all_rows = supplement_renewal_coverages(base_rows + all_rows)
     save_excel(all_rows, skip_rows)
 
 
